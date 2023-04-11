@@ -4,6 +4,7 @@
  * Hank C. Hogan
  * Apr 10 2023
  */
+#include <bits/types/sigset_t.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -303,7 +304,7 @@ void do_bgfg(char **argv)
 	if(!strcmp(argv[0], "bg")) state = BG;
 	else state = FG;
 	if(argv[1] == NULL) {
-		printf("usage: %s <pid> or %s %<jobid>\n", argv[0], argv[0]);
+		printf("usage: %s <pid> or %s %%<jobid>\n", argv[0], argv[0]);
 		return;
 	}
 
@@ -348,7 +349,11 @@ void do_bgfg(char **argv)
  */
 void waitfg(pid_t pid)
 {
-
+	sigset_t msk;
+	sigemptyset(&msk);
+	while(fgpid(jobs) != 0) {
+		sigsuspend(&msk);
+	}
     return;
 }
 
@@ -365,6 +370,33 @@ void waitfg(pid_t pid)
  */
 void sigchld_handler(int sig) 
 {
+	int oerrno = errno;
+	pid_t pid;
+	int status;
+	struct job_t* job;
+	sigset_t omsk, msk;
+	sigfillset(&msk);
+
+	while((pid = waitpid(-1, &status, WNOHANG | WUNTRACED)) > 0) {
+		sigprocmask(SIG_SETMASK, &msk, &omsk);
+		if(WIFEXITED(status)) {
+			deletejob(jobs, pid);
+		}
+
+		if(WIFSIGNALED(status)) {
+			printf("Job [%d] (%d) terminated by signal %d\n", pid2jid(pid), pid, WTERMSIG(status));
+			deletejob(jobs, pid);
+		}
+		if(WIFSTOPPED(status)) {
+			printf("Job [%d] (%d) terminated by signal %d\n", pid2jid(pid), pid, WSTOPSIG(status));
+			job = getjobpid(jobs, pid);
+			job->state = ST;
+		}
+		sigprocmask(SIG_SETMASK, &omsk, NULL);
+	}
+
+	// restore
+	errno = oerrno;
     return;
 }
 
@@ -375,6 +407,17 @@ void sigchld_handler(int sig)
  */
 void sigint_handler(int sig) 
 {
+	int oerrno = errno;
+	pid_t pid;
+	sigset_t omsk, msk;
+	sigfillset(&msk);
+	sigprocmask(SIG_SETMASK, &msk, &omsk);
+	if((pid = fgpid(jobs)) != 0) {
+		sigprocmask(SIG_SETMASK, &omsk, NULL);
+		// send the signal to all the foreground groups
+		kill(-pid, SIGINT);
+	}
+	errno = oerrno;
     return;
 }
 
@@ -385,8 +428,20 @@ void sigint_handler(int sig)
  */
 void sigtstp_handler(int sig) 
 {
+	int oerrno = errno;
+	pid_t pid;
+	sigset_t msk, omsk;
+	sigfillset(&msk);
+	sigprocmask(SIG_SETMASK, &msk, &omsk);
+	if((pid = fgpid(jobs)) != 0) {
+		sigprocmask(SIG_SETMASK, &omsk, NULL);
+		// send sigstp to all the foreground groups
+		kill(-pid, SIGSTOP);
+	}
+	errno = oerrno;
     return;
 }
+// Hank note: while manipulating the job list, we must block all the signals to get rid of the race condition
 
 /*********************
  * End signal handlers

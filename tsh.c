@@ -166,6 +166,44 @@ int main(int argc, char **argv)
 */
 void eval(char *cmdline) 
 {
+	char* argv[MAXARGS];
+	char buf[MAXLINE];
+	int bg;
+	pid_t pid;
+	sigset_t mskall, omsk, mskchld;
+
+	sigemptyset(&mskchld);
+	sigaddset(&mskchld, SIGCHLD);
+	sigfillset(&mskall);
+
+	strcpy(buf, cmdline);
+	bg = parseline(buf, argv);
+	// ignore the empty lines
+	if(argv[0] == NULL) return;
+	if(!builtin_cmd(argv)) {
+		sigprocmask(SIG_BLOCK, &mskchld, &omsk);
+		if((pid = fork()) == 0) {
+			// set group id as the pid
+			setpgid(0, 0);
+			// unmask the SIGCHLD signal before execve
+			sigprocmask(SIG_SETMASK, &omsk, NULL);
+			if(execve(argv[0], argv, environ) < 0) {
+				printf("%s: Command not found. \n", argv[0]);
+				// not found, return immediately
+				return;
+			}
+		}
+
+		sigprocmask(SIG_SETMASK, &mskall, NULL);
+		addjob(jobs, pid, bg, cmdline);
+		sigprocmask(SIG_SETMASK, &omsk, NULL);
+		
+		if(!bg) {
+			waitfg(pid);
+		} else {
+			printf("[%d] (%d) %s\n", pid2jid(pid), pid, argv[0]);
+		}
+	}
     return;
 }
 
@@ -232,6 +270,24 @@ int parseline(const char *cmdline, char **argv)
  */
 int builtin_cmd(char **argv) 
 {
+	if(!strcmp(argv[0], "quit")) {
+		exit(0);
+	}
+
+	if(!strcmp(argv[0], "jobs")) {
+		listjobs(jobs);
+		return 1;
+	}
+
+	if(!strcmp(argv[0], "fg") || !strcmp(argv[0], "bg")) {
+		do_bgfg(argv);
+		return 1;
+	}
+
+	if(!strcmp(argv[0], "&")) {
+		return 1;
+	}
+
     return 0;     /* not a builtin command */
 }
 
@@ -240,6 +296,50 @@ int builtin_cmd(char **argv)
  */
 void do_bgfg(char **argv) 
 {
+	struct job_t *job = NULL;
+	int jid, pid;
+	int state;
+	
+	if(!strcmp(argv[0], "bg")) state = BG;
+	else state = FG;
+	if(argv[1] == NULL) {
+		printf("usage: %s <pid> or %s %<jobid>\n", argv[0], argv[0]);
+		return;
+	}
+
+	// user input a jobid
+	if(argv[1][0] == '%') {
+		if(sscanf(&argv[1][1], "%d", &jid) > 0) {
+			job = getjobjid(jobs, jid);
+			if(job == NULL) {
+				printf("%s: No such job %%%d\n", argv[0], jid);
+				return;
+			}
+		} else {
+			printf("%s: argument must be a pid or a %%jobid\n", argv[0]);
+			return;
+		}
+	} else {
+		// user input is a pid
+		if(sscanf(argv[1], "%dd", &pid) > 0) {
+			job = getjobpid(jobs, pid);
+			if(job == NULL) {
+				printf("%s: no such process %d\n", argv[0], pid);
+				return;
+			}
+		}
+	}
+
+	// negative pid means group id
+	// wake the group
+	kill(-(job->pid), SIGCONT);
+	job->state = state;
+	if(state == BG) {
+		printf("[%d] (%d) %s", job->jid, job->pid, job->cmdline);
+	} else {
+		waitfg(job->pid);
+	}
+
     return;
 }
 
@@ -248,6 +348,7 @@ void do_bgfg(char **argv)
  */
 void waitfg(pid_t pid)
 {
+
     return;
 }
 
